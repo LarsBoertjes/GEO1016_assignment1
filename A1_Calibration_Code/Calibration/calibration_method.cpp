@@ -258,20 +258,49 @@ bool Calibration::calibration(
     // TODO: solve for M (the whole projection matrix, i.e., M = K * [R, t]) using SVD decomposition.
     //   Optional: you can check if your M is correct by applying M on the 3D points. If correct, the projected point
     //             should be very close to your input images points.
+    Matrix U, S, V;
+    svd_decompose(P, U, S, V);
 
+    // Extract m from the last column of V
+    Vector m = V.get_column(V.cols() - 1);
+    std::cout << m.size() << std::endl;
 
-
-    return true;
+    // Reformat vector m into matrix M
+    Matrix33 M;
+    M.set_column(0, {m[0], m[1], m[2]});
+    M.set_column(1, {m[4], m[5], m[6]});
+    M.set_column(2, {m[8], m[9], m[10]});
+    t = Vector3D(m[3], m[7], m[11]); // Translation vector
 
     // TODO: extract intrinsic parameters from M.
-    Matrix33 K;
+    Vector3D a1 = M.get_column(0);
+    Vector3D a2 = M.get_column(1);
+    Vector3D a3 = M.get_column(2);
+    double rho = 1 / norm(a3);
+    cx = rho * rho * dot(a1, a3);
+    cy = rho * rho * dot(a2, a3);
+    double cosTheta = -dot(cross(a1, a3), cross(a2, a3)) / (norm(cross(a1, a3)) * norm(cross(a2, a3)));
+    double sinTheta = sqrt(1 - cosTheta * cosTheta);
+    fx = rho * rho * norm(cross(a1, a3)) * sinTheta;
+    fy = rho * rho * norm(cross(a2, a3)) * sinTheta;
 
-    // TODO: extract extrinsic parameters from M.
+    // Calculate extrinsic parameters
+    Vector3D r1 = cross(a2, a3) / norm(cross(a2, a3));
+    Vector3D r3 = rho * a3;
+    Vector3D r2 = cross(r3, r1);
+
+    R.set_column(0, r1);
+    R.set_column(1, r2);
+    R.set_column(2, r3);
+
+    t = rho * (M.inverse() * m.subvector(3, 3)); // Recompute t based on the inverse of matrix M
+
+    std::cout << "Calibration successful, updating camera parameters.\n";
 
     std::cout << "\n\tTODO: After you implement this function, please return 'true' - this will trigger the viewer to\n"
                  "\t\tupdate the rendering using your recovered camera parameters. This can help you to visually check\n"
                  "\t\tif your calibration is successful or not.\n\n" << std::flush;
-    return false;
+    return true;
 }
 
 
