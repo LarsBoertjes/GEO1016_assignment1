@@ -28,19 +28,23 @@
 
 using namespace easy3d;
 
-std::vector<Vector3D> points_3d = {{5, 0, 2}, {3, 8, 0}, {0, 7, 7}, {1, 0, 1},
-                                   {10, 10, 0}, {5, 3, 0}, {1, 9, 0}, {3, 0, 8},
-                                   {10, 0, 10}, {2, 8, 0}};
-
-std::vector<Vector2D> points_2d = {{494, 464}, {473, 239}, {297, 301}, {414, 435},
-                                   {662, 204}, {518, 374}, {426, 207}, {365, 524},
-                                   {536, 610}, {450, 237}};
-
 /**
  * TODO: Finish this function for calibrating a camera from the corresponding 3D-2D point pairs.
  *       You may define a few functions for some sub-tasks.
  * @return True on success, otherwise false. On success, the camera parameters are returned by fx, fy, cx, cy, skew, R, and t).
  */
+
+bool validate(const Matrix34 &M, const std::vector<Vector3D> &P, const std::vector<Vector2D> &p, const double &threshold=1.0) {
+    int nps = std::min(P.size(), p.size());
+    for (int i = 0; i < nps; i++) {
+        Vector2D delta = Vector3D(M*P[i].homogeneous()).cartesian() - p[i];
+        if (std::abs(delta.norm()) > threshold) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Calibration::calibration(
         const std::vector<Vector3D>& points_3d, /// input: An array of 3D points.
         const std::vector<Vector2D>& points_2d, /// input: An array of 2D image points.
@@ -100,45 +104,70 @@ bool Calibration::calibration(
     // TODO: solve for M (the whole projection matrix, i.e., M = K * [R, t]) using SVD decomposition.
     //   Optional: you can check if your M is correct by applying M on the 3D points. If correct, the projected point
     //             should be very close to your input images points.
-    Matrix U, D, V;
+    Matrix U = Matrix(2*num_points, 2*num_points, 0.0);
+    Matrix D = Matrix(2*num_points, 12, 0.0);
+    Matrix V = Matrix(12, 12, 0.0);
+
     svd_decompose(P, U, D, V);
 
     // Extract m from the last column of V
     Vector m = V.get_column(V.cols() - 1);
 
     // Reformat vector m into matrix M
-    Matrix33 M;
-    M.set_column(0, {m[0], m[1], m[2]});
-    M.set_column(1, {m[4], m[5], m[6]});
-    M.set_column(2, {m[8], m[9], m[10]});
-    t = Vector3D(m[3], m[7], m[11]); // Translation vector
+    Matrix34 M(
+            m[0], m[1], m[2], m[3],
+            m[4], m[5], m[6], m[7],
+            m[8], m[9], m[10], m[11]
+            );
 
-    // TODO: extract intrinsic parameters from M.
-    Vector3D a1 = M.get_row(0);
-    Vector3D a2 = M.get_row(1);
-    Vector3D a3 = M.get_row(2);
-    double rho = 1 / norm(a3);
-    cx = rho * rho * dot(a1, a3);
-    cy = rho * rho * dot(a2, a3);
-    double cosTheta = -dot(cross(a1, a3), cross(a2, a3)) / (norm(cross(a1, a3)) * norm(cross(a2, a3)));
-    double sinTheta = sqrt(1 - cosTheta * cosTheta);
-    fx = rho * rho * norm(cross(a1, a3)) * sinTheta;
-    fy = rho * rho * norm(cross(a2, a3)) * sinTheta;
+    Matrix33 A = Matrix33(
+            m[0], m[1], m[2],
+            m[4], m[5], m[6],
+            m[8], m[9], m[10]
+    );
 
-    // Calculate extrinsic parameters
-    Vector3D r1 = cross(a2, a3) / norm(cross(a2, a3));
-    Vector3D r3 = rho * a3;
-    Vector3D r2 = cross(r3, r1);
+    double scale = 1 / A.get_row(2).norm();
+    LOG(INFO) << "Scale: " << scale;
+    M *= scale;
 
-    R.set_column(0, r1);
-    R.set_column(1, r2);
-    R.set_column(2, r3);
+    // Validate the M matrix, and adjust to negative scale if neccessary
+    if (!validate(M, points_3d, points_2d)) {
+        M *= -1;
+        scale *= -1;
+        if (!validate(M, points_3d, points_2d)) {
+            std::cerr << "Projection failed.";
+            return false;
+        }
+    }
 
-    std::cout << "Calibration successful, updating camera parameters.\n";
+    double theta = acos(dot(cross(A.get_row(0), A.get_row(2)).normalize(), cross(A.get_row(1), A.get_row(2)).normalize()));
+    if (theta < 0) {
+        theta += M_PI;
+    }
+    std::cout << "FOV: " << (theta/M_PI)*180;
 
-    std::cout << "\n\tTODO: After you implement this function, please return 'true' - this will trigger the viewer to\n"
-                 "\t\tupdate the rendering using your recovered camera parameters. This can help you to visually check\n"
-                 "\t\tif your calibration is successful or not.\n\n" << std::flush;
+    // Extract the intrinsic & the extrinsic parameters from M.
+    fx = cross(A.get_row(0), A.get_row(2)).norm() * sin(theta) * pow(scale, 2);
+    fy = cross(A.get_row(1), A.get_row(2)).norm() * pow(scale, 2);
+    cx = pow(scale, 2) * dot(A.get_row(0), A.get_row(2));
+    cy = pow(scale, 2) * dot(A.get_row(1), A.get_row(2));
+    s = -fx / tan(theta);
+
+    Matrix33 K(
+            fx, s, cx,
+            0, fy, cy,
+            0, 0, 1
+    );
+
+    t = (inverse(K) * scale) * Vector3D(m[3], m[7], m[11]);
+    R.set_row(0, cross(A.get_row(1), A.get_row(2)).normalize());
+    R.set_row(2, A.get_row(2) * scale);
+    R.set_row(1, cross(R.get_row(2), R.get_row(0)));
+
+    std::cout << "Camera translation: " << t;
+    std::cout << "Camera rotation matrix: " << R;
+
+    std::cout << "Camera calibrated successfully." << std::endl;
     return true;
 }
 
